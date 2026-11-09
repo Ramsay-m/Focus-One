@@ -44,16 +44,17 @@ button{-webkit-tap-highlight-color:transparent;cursor:pointer}
 #lock-screen .lock-box{text-align:center;max-width:340px;width:90%;animation:scaleIn .4s ease}
 #lock-screen h1{font-family:'Fraunces',serif;font-size:36px;font-weight:800;color:#E8734A;margin-bottom:4px}
 #lock-screen .subtitle{color:#9A8778;font-size:15px;margin-bottom:32px}
-#lock-screen .pin-row{display:flex;gap:12px;justify-content:center;margin-bottom:20px}
-#lock-screen .pin-dot{width:16px;height:16px;border-radius:50%;border:2px solid #E8734A;transition:all .15s ease}
-#lock-screen .pin-dot.filled{background:#E8734A}
-#lock-screen .pin-dot.wrong{border-color:#C0462B;background:#C0462B;animation:wiggle .4s ease}
-#lock-screen .keypad{display:grid;grid-template-columns:repeat(3,72px);gap:10px;justify-content:center}
-#lock-screen .key{width:72px;height:56px;border:none;border-radius:14px;font-family:'DM Sans',sans-serif;font-size:22px;font-weight:700;cursor:pointer;transition:all .15s ease;background:#fff;color:#3D2C1E;box-shadow:0 2px 8px rgba(60,40,20,.07)}
-#lock-screen .key:active{transform:scale(.94);background:#FDEEE7}
-#lock-screen .key.fn{font-size:14px;font-weight:600;background:transparent;box-shadow:none;color:#9A8778}
-#lock-screen .lock-hint{color:#9A8778;font-size:13px;margin-top:16px;min-height:20px}
+#lock-screen form{background:#fff;border-radius:20px;padding:24px;box-shadow:0 2px 16px rgba(60,40,20,.07);text-align:left;display:flex;flex-direction:column;gap:14px}
+#lock-screen label{font-size:12px;font-weight:700;color:#9A8778;text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:6px}
+#lock-screen input[type=text],#lock-screen input[type=password],#lock-screen input[type=url]{width:100%;padding:13px 14px;border:2px solid #EDE4DA;border-radius:12px;font-size:16px;outline:none;transition:border .2s;background:#fff;color:#3D2C1E}
+#lock-screen input:focus{border-color:#E8734A}
+#lock-screen .remember{display:flex;align-items:center;gap:8px;font-size:14px;color:#5a4a3a}
+#lock-screen .remember input{width:18px;height:18px;accent-color:#E8734A}
+#lock-screen .signin{border:none;font-weight:700;border-radius:14px;padding:15px;font-size:16px;background:linear-gradient(135deg,#E8734A,#D4563A);color:#fff;box-shadow:0 4px 18px rgba(232,115,74,.3)}
+#lock-screen .signin:disabled{opacity:.6}
+#lock-screen .lock-hint{color:#9A8778;font-size:13px;min-height:18px;text-align:center}
 #lock-screen .lock-hint.error{color:#C0462B}
+#lock-screen .url-toggle{background:none;border:none;color:#9A8778;font-size:12px;text-decoration:underline;padding:0;align-self:flex-start}
 </style>
 </head>
 <body>
@@ -61,10 +62,26 @@ button{-webkit-tap-highlight-color:transparent;cursor:pointer}
   <div class="lock-box">
     <h1>Focus One</h1>
     <p class="subtitle">One task at a time. You've got this.</p>
-    <p id="lock-label" style="color:#3D2C1E;font-size:15px;font-weight:600;margin-bottom:20px">Enter your passcode</p>
-    <div class="pin-row" id="pin-dots"></div>
-    <div class="keypad" id="keypad"></div>
-    <p class="lock-hint" id="lock-hint"></p>
+    <form id="login-form" autocomplete="on">
+      <div>
+        <label for="login-user">Username</label>
+        <input type="text" id="login-user" name="username" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" required>
+      </div>
+      <div>
+        <label for="login-pass">Password</label>
+        <input type="password" id="login-pass" name="password" autocomplete="current-password" required>
+      </div>
+      <div id="url-field">
+        <label for="login-url">Apps Script URL</label>
+        <input type="url" id="login-url" placeholder="https://script.google.com/macros/s/..." autocomplete="off" autocapitalize="none" spellcheck="false">
+      </div>
+      <button type="button" class="url-toggle" id="url-toggle" hidden>Change Apps Script URL</button>
+      <label class="remember" style="text-transform:none;letter-spacing:0;font-weight:500;margin:0">
+        <input type="checkbox" id="login-remember" checked> Keep me signed in on this device
+      </label>
+      <button type="submit" class="signin" id="login-btn">Sign in</button>
+      <p class="lock-hint" id="lock-hint"></p>
+    </form>
   </div>
 </div>
 <canvas id="confetti-canvas"></canvas>
@@ -74,144 +91,147 @@ button{-webkit-tap-highlight-color:transparent;cursor:pointer}
 
 <script>
 // ============================================================
-// LOCK SCREEN
+// AUTH + ENCRYPTION
+// Nothing secret lives in this file. The Apps Script checks the
+// username/password on Google's servers, and the copy of your tasks
+// saved in this browser is encrypted with a key made from your password.
 // ============================================================
-(function(){
-  const PIN_LEN = 4;
-  const HASH_KEY = 'focusone_pin_hash';
-  let pin = '';
-  let confirmPin = '';
-  let phase = 'enter'; // 'setup' | 'confirm' | 'enter'
-  let wrong = false;
+const URL_KEY = 'focusone_script_url';
+const REMEMBER_KEY = 'focusone_auth';
+const ENC_KEY = 'focusone_tasks_enc';
+const SALT_KEY = 'focusone_salt';
+let AUTH = null;        // {username, password} — in memory only, unless "keep me signed in"
+let CRYPTO_KEY = null;  // AES key derived from the password
 
-  // Simple hash (SHA-256 via SubtleCrypto)
-  async function hashPin(p) {
-    const enc = new TextEncoder().encode('focusone_salt_' + p);
-    const buf = await crypto.subtle.digest('SHA-256', enc);
-    return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
-  }
+function lsGet(k){try{return localStorage.getItem(k)}catch(e){return null}}
+function lsSet(k,v){try{localStorage.setItem(k,v)}catch(e){}}
+function lsDel(k){try{localStorage.removeItem(k)}catch(e){}}
 
-  const stored = localStorage.getItem(HASH_KEY);
-  phase = stored ? 'enter' : 'setup';
+const b64 = buf => btoa(String.fromCharCode(...new Uint8Array(buf)));
+const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 
-  const lockEl = document.getElementById('lock-screen');
-  const dotsEl = document.getElementById('pin-dots');
-  const labelEl = document.getElementById('lock-label');
-  const hintEl = document.getElementById('lock-hint');
-  const keypadEl = document.getElementById('keypad');
+function getSalt(){
+  let s = lsGet(SALT_KEY);
+  if(!s){ s = b64(crypto.getRandomValues(new Uint8Array(16))); lsSet(SALT_KEY, s); }
+  return unb64(s);
+}
 
-  function renderLock() {
-    // Label
-    if (phase === 'setup') {
-      labelEl.textContent = 'Create a 4-digit passcode';
-      hintEl.textContent = 'This keeps your tasks private.';
-      hintEl.className = 'lock-hint';
-    } else if (phase === 'confirm') {
-      labelEl.textContent = 'Confirm your passcode';
-      hintEl.textContent = 'Enter it once more.';
-      hintEl.className = 'lock-hint';
-    } else {
-      labelEl.textContent = 'Enter your passcode';
-      if (wrong) {
-        hintEl.textContent = 'Wrong passcode. Try again.';
-        hintEl.className = 'lock-hint error';
-      } else {
-        hintEl.textContent = '';
-        hintEl.className = 'lock-hint';
-      }
-    }
+async function deriveKey(username, password){
+  const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(username + '\u0000' + password), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({name:'PBKDF2', salt:getSalt(), iterations:250000, hash:'SHA-256'},
+    base, {name:'AES-GCM', length:256}, false, ['encrypt','decrypt']);
+}
 
-    // Dots
-    dotsEl.innerHTML = '';
-    for (let i = 0; i < PIN_LEN; i++) {
-      const d = document.createElement('div');
-      d.className = 'pin-dot' + (i < pin.length ? ' filled' : '') + (wrong && i < pin.length ? ' wrong' : '');
-      dotsEl.appendChild(d);
-    }
+async function encryptToStorage(plain){
+  if(!CRYPTO_KEY) return;
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({name:'AES-GCM', iv}, CRYPTO_KEY, new TextEncoder().encode(plain));
+  lsSet(ENC_KEY, JSON.stringify({iv:b64(iv), ct:b64(ct)}));
+}
 
-    // Keypad
-    keypadEl.innerHTML = '';
-    const keys = [1,2,3,4,5,6,7,8,9,'','0','⌫'];
-    keys.forEach(k => {
-      const btn = document.createElement('button');
-      if (k === '') { btn.style.visibility = 'hidden'; btn.className = 'key'; }
-      else if (k === '⌫') { btn.className = 'key fn'; btn.textContent = '⌫'; btn.onclick = () => { pin = pin.slice(0,-1); wrong = false; renderLock(); }; }
-      else { btn.className = 'key'; btn.textContent = k; btn.onclick = () => pressKey(String(k)); }
-      keypadEl.appendChild(btn);
-    });
-  }
+async function decryptFromStorage(key){
+  const raw = lsGet(ENC_KEY);
+  if(!raw) throw new Error('no cache');
+  const {iv, ct} = JSON.parse(raw);
+  const pt = await crypto.subtle.decrypt({name:'AES-GCM', iv:unb64(iv)}, key, unb64(ct));
+  return JSON.parse(new TextDecoder().decode(pt));
+}
 
-  async function pressKey(digit) {
-    if (pin.length >= PIN_LEN) return;
-    wrong = false;
-    pin += digit;
-    renderLock();
-
-    if (pin.length === PIN_LEN) {
-      setTimeout(async () => {
-        if (phase === 'setup') {
-          confirmPin = pin;
-          pin = '';
-          phase = 'confirm';
-          renderLock();
-        } else if (phase === 'confirm') {
-          if (pin === confirmPin) {
-            const h = await hashPin(pin);
-            localStorage.setItem(HASH_KEY, h);
-            unlock();
-          } else {
-            pin = '';
-            confirmPin = '';
-            phase = 'setup';
-            wrong = true;
-            hintEl.textContent = "Didn't match. Let's start over.";
-            hintEl.className = 'lock-hint error';
-            renderLock();
-          }
-        } else {
-          const h = await hashPin(pin);
-          if (h === stored) {
-            unlock();
-          } else {
-            wrong = true;
-            pin = '';
-            renderLock();
-          }
-        }
-      }, 150);
-    }
-  }
-
-  function unlock() {
-    lockEl.style.display = 'none';
-    document.getElementById('app').style.display = 'flex';
-    window.__focusOneUnlocked = true;
-    // Fire the app init
-    if (window.__focusOneInit) window.__focusOneInit();
-  }
-
-  // Keyboard support for desktop
-  document.addEventListener('keydown', function(e) {
-    if (lockEl.style.display === 'none') return;
-    if (e.key >= '0' && e.key <= '9') pressKey(e.key);
-    else if (e.key === 'Backspace') { pin = pin.slice(0,-1); wrong = false; renderLock(); }
+async function apiCall(url, action, payload){
+  const resp = await fetch(url, {
+    method:'POST',
+    headers:{'Content-Type':'text/plain'}, // Apps Script needs this for CORS
+    body: JSON.stringify({action, ...(payload||{}), username:AUTH?.username, password:AUTH?.password}),
   });
+  const result = await resp.json();
+  if(result && result.auth) { signOut('Your login changed. Please sign in again.'); throw new Error('auth'); }
+  return result;
+}
 
-  renderLock();
-})();
-</script>
+async function signIn(username, password, url, remember){
+  const key = await deriveKey(username, password);
+  let result = null;
+  try {
+    const resp = await fetch(url, {method:'POST', headers:{'Content-Type':'text/plain'},
+      body: JSON.stringify({action:'login', username, password})});
+    result = await resp.json();
+  } catch(e) { result = null; }
 
-<script>
-// ============================================================
-// CONFIG — Paste your deployed Apps Script URL here
-// ============================================================
-const SCRIPT_URL = localStorage.getItem('focusone_script_url') || '';
+  if (result) {
+    if (!result.success) throw new Error(result.error || 'Sign-in failed.');
+    AUTH = {username, password}; CRYPTO_KEY = key;
+    tasks = Array.isArray(result.tasks) ? result.tasks : [];
+    syncStatus = 'connected'; lastSyncError = '';
+    saveLocal();
+    lsDel('focusone_tasks'); lsDel('focusone_pin_hash'); // remove old unencrypted data
+  } else {
+    // Can't reach Google — open the encrypted copy on this device instead.
+    try { tasks = await decryptFromStorage(key); }
+    catch(e) { throw new Error("Can't reach Google Sheets, and there's no saved copy on this device for that login."); }
+    AUTH = {username, password}; CRYPTO_KEY = key;
+    syncStatus = 'offline'; lastSyncError = 'Working offline';
+  }
+
+  lsSet(URL_KEY, url);
+  if (remember) lsSet(REMEMBER_KEY, JSON.stringify({username, password}));
+  else lsDel(REMEMBER_KEY);
+
+  document.getElementById('lock-screen').style.display = 'none';
+  document.getElementById('app').style.display = 'flex';
+  view = 'list'; render();
+}
+
+function signOut(msg){
+  lsDel(REMEMBER_KEY);
+  AUTH = null; CRYPTO_KEY = null; tasks = [];
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('app').innerHTML = '';
+  document.getElementById('lock-screen').style.display = 'flex';
+  document.getElementById('login-pass').value = '';
+  setupLoginForm(msg || '', !!msg);
+}
+
+function setupLoginForm(msg, isError){
+  const savedUrl = lsGet(URL_KEY) || '';
+  const urlField = document.getElementById('url-field');
+  const toggle = document.getElementById('url-toggle');
+  document.getElementById('login-url').value = savedUrl;
+  urlField.hidden = !!savedUrl;
+  toggle.hidden = !savedUrl;
+  const hint = document.getElementById('lock-hint');
+  hint.textContent = msg || '';
+  hint.className = 'lock-hint' + (isError ? ' error' : '');
+}
+
+document.getElementById('url-toggle').addEventListener('click', () => {
+  document.getElementById('url-field').hidden = false;
+  document.getElementById('url-toggle').hidden = true;
+});
+
+document.getElementById('login-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const u = document.getElementById('login-user').value.trim();
+  const p = document.getElementById('login-pass').value;
+  const url = document.getElementById('login-url').value.trim();
+  const remember = document.getElementById('login-remember').checked;
+  const hint = document.getElementById('lock-hint');
+  const btn = document.getElementById('login-btn');
+  if (!url.startsWith('https://script.google.com/')) {
+    document.getElementById('url-field').hidden = false;
+    hint.textContent = 'Enter your Apps Script URL (starts with https://script.google.com/).';
+    hint.className = 'lock-hint error'; return;
+  }
+  btn.disabled = true; btn.textContent = 'Signing in…';
+  hint.textContent = ''; hint.className = 'lock-hint';
+  try { await signIn(u, p, url, remember); }
+  catch(err) { hint.textContent = err.message; hint.className = 'lock-hint error'; }
+  btn.disabled = false; btn.textContent = 'Sign in';
+});
 
 // ============================================================
 // STATE
 // ============================================================
-const SK = 'focusone_tasks';
-let tasks = loadLocal();
+let tasks = [];
 let view = 'list';
 let focusTask = null;
 let skipped = [];
@@ -220,7 +240,7 @@ let fText='', fLoc='', fImp=null, fDur=null, fProj='';
 let focusProject = null; // null = show picker, '' = all, 'Name' = specific
 let newProjMode = false;
 let newProjText = '';
-let syncStatus = SCRIPT_URL ? 'connected' : 'disconnected'; // connected | syncing | offline | disconnected
+let syncStatus = 'disconnected'; // connected | syncing | offline | disconnected
 let lastSyncError = '';
 
 const LOCS = ['Home','Work','Office','Outside','Errands','Computer','Phone','Anywhere'];
@@ -246,90 +266,63 @@ function toast(msg) {
 }
 
 // ============================================================
-// LOCAL PERSISTENCE (always used as cache)
+// LOCAL PERSISTENCE (encrypted cache in this browser)
 // ============================================================
-function loadLocal(){try{const r=localStorage.getItem(SK);if(r)return JSON.parse(r)}catch(e){}return[]}
-function saveLocal(){try{localStorage.setItem(SK,JSON.stringify(tasks))}catch(e){}}
-
-// ============================================================
-// GOOGLE SHEETS SYNC
-// ============================================================
-function getScriptUrl() {
-  return localStorage.getItem('focusone_script_url') || '';
+let saveChain = Promise.resolve();
+function saveLocal(){
+  const data = JSON.stringify(tasks);
+  saveChain = saveChain.then(() => encryptToStorage(data)).catch(() => {});
 }
 
-function isConnected() {
-  return !!getScriptUrl();
-}
+// ============================================================
+// GOOGLE SHEETS SYNC (every request carries your login)
+// ============================================================
+function getScriptUrl() { return lsGet(URL_KEY) || ''; }
+function isConnected() { return !!getScriptUrl() && !!AUTH; }
 
 async function sheetFetch(tasks_data) {
-  const url = getScriptUrl();
-  if (!url) return null;
-
+  if (!isConnected()) return null;
   syncStatus = 'syncing'; render();
-
   try {
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain' }, // Apps Script needs this for CORS
-      body: JSON.stringify({ action: 'sync', tasks: tasks_data }),
-    });
-    const result = await resp.json();
-    if (result.success) {
-      syncStatus = 'connected';
-      lastSyncError = '';
-    } else {
-      syncStatus = 'offline';
-      lastSyncError = result.error || 'Unknown error';
-    }
+    const result = await apiCall(getScriptUrl(), 'sync', { tasks: tasks_data });
+    if (result.success) { syncStatus = 'connected'; lastSyncError = ''; }
+    else { syncStatus = 'offline'; lastSyncError = result.error || 'Unknown error'; }
   } catch (err) {
-    syncStatus = 'offline';
-    lastSyncError = err.message;
+    if (err.message === 'auth') return;
+    syncStatus = 'offline'; lastSyncError = err.message;
   }
   render();
 }
 
 async function sheetPost(action, payload) {
-  const url = getScriptUrl();
-  if (!url) return null;
-
+  if (!isConnected()) return null;
   try {
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain' },
-      body: JSON.stringify({ action, ...payload }),
-    });
-    return await resp.json();
+    const result = await apiCall(getScriptUrl(), action, payload);
+    if (result.success && syncStatus === 'offline') { syncStatus = 'connected'; lastSyncError = ''; render(); }
+    return result;
   } catch (err) {
-    syncStatus = 'offline';
-    lastSyncError = err.message;
-    render();
+    if (err.message === 'auth') return null;
+    syncStatus = 'offline'; lastSyncError = err.message; render();
     return null;
   }
 }
 
 async function pullFromSheet() {
-  const url = getScriptUrl();
-  if (!url) return;
-
+  if (!isConnected()) return;
   syncStatus = 'syncing'; render();
-
   try {
-    const resp = await fetch(url);
-    const result = await resp.json();
+    const result = await apiCall(getScriptUrl(), 'list');
     if (result.success && Array.isArray(result.tasks)) {
       tasks = result.tasks;
       saveLocal();
-      syncStatus = 'connected';
-      lastSyncError = '';
+      syncStatus = 'connected'; lastSyncError = '';
       toast('Synced from Google Sheets');
     } else {
-      syncStatus = 'offline';
-      lastSyncError = result.error || 'Failed to pull';
+      syncStatus = 'offline'; lastSyncError = result.error || 'Failed to pull';
     }
   } catch (err) {
-    syncStatus = 'offline';
-    lastSyncError = err.message;
+    if (err.message === 'auth') return;
+    syncStatus = 'offline'; lastSyncError = err.message;
   }
   render();
 }
@@ -452,33 +445,6 @@ function addTask(){
   fText='';fLoc='';fImp=null;fDur=null;fProj='';newProjMode=false;newProjText='';view='list';render();
 }
 
-// Settings actions
-function saveScriptUrl() {
-  const inp = document.getElementById('script-url-input');
-  const url = inp.value.trim();
-  if (url) {
-    localStorage.setItem('focusone_script_url', url);
-    syncStatus = 'connected';
-    toast('Connected! Syncing...');
-    render();
-    // Push current local tasks to sheet
-    pushToSheet();
-  } else {
-    localStorage.removeItem('focusone_script_url');
-    syncStatus = 'disconnected';
-    toast('Disconnected from Google Sheets');
-    render();
-  }
-}
-
-function disconnectSheet() {
-  localStorage.removeItem('focusone_script_url');
-  syncStatus = 'disconnected';
-  lastSyncError = '';
-  toast('Disconnected');
-  render();
-}
-
 // ============================================================
 // HELPERS
 // ============================================================
@@ -502,6 +468,7 @@ const accent='#E8734A',green='#01A66F';
 // RENDER
 // ============================================================
 function render(){
+  if(!AUTH) return;
   const app=document.getElementById('app');
   const inc=tasks.filter(t=>!t.done), done=tasks.filter(t=>t.done);
   let h='';
@@ -705,7 +672,6 @@ function render(){
   // ====== SETTINGS VIEW ======
   if(view==='settings'){
     const tc=tasks.length, dc=tasks.filter(t=>t.done).length;
-    const currentUrl = getScriptUrl();
 
     h+=`<div style="background:#fff;border-radius:20px;padding:24px;box-shadow:0 2px 16px rgba(60,40,20,.07);animation:scaleIn .35s ease">
       <h2 style="font-family:'Fraunces',serif;font-size:22px;font-weight:700;margin-bottom:4px">Settings</h2>
@@ -718,11 +684,10 @@ function render(){
           <span style="font-size:20px">📊</span> Google Sheets Sync
         </h3>
         <p style="color:#9A8778;font-size:13px;margin-bottom:16px">
-          Connect to a Google Sheet to back up and sync your tasks.
+          Your tasks are saved to your Google Sheet.
         </p>`;
 
-    if (currentUrl) {
-      // Connected state
+    {
       const statusColor = syncStatus === 'connected' ? green : (syncStatus === 'offline' ? '#FECA57' : '#ccc');
       const statusText = syncStatus === 'connected' ? 'Connected' : (syncStatus === 'offline' ? 'Connection issue' : 'Syncing...');
       h += `
@@ -737,22 +702,7 @@ function render(){
             background:#FDEEE7;color:${accent}">↓ Pull from Sheet</button>
           <button onclick="pushToSheet()" style="${B}flex:1;padding:12px;font-size:13px;
             background:#FDEEE7;color:${accent}">↑ Push to Sheet</button>
-        </div>
-        <button onclick="disconnectSheet()" style="${B}width:100%;padding:10px;font-size:12px;
-          background:transparent;color:#C0462B;margin-top:8px">Disconnect</button>`;
-    } else {
-      // Not connected state
-      h += `
-        <label style="font-size:12px;font-weight:700;color:#9A8778;display:block;margin-bottom:6px">
-          Apps Script Web App URL
-        </label>
-        <input type="text" id="script-url-input" placeholder="https://script.google.com/macros/s/..."
-          style="width:100%;padding:12px 14px;border:2px solid #EDE4DA;border-radius:10px;
-          font-size:13px;outline:none;margin-bottom:10px;transition:border .2s"
-          onfocus="this.style.borderColor='${accent}'" onblur="this.style.borderColor='#EDE4DA'">
-        <button onclick="saveScriptUrl()" style="${B}width:100%;padding:12px;font-size:14px;
-          background:linear-gradient(135deg,${accent},#D4563A);color:#fff;
-          box-shadow:0 4px 14px rgba(232,115,74,.3)">Connect</button>`;
+        </div>`;
     }
 
     h += `</div>
@@ -790,14 +740,10 @@ function render(){
           <span style="font-size:20px">🔒</span> Security
         </h3>
         <p style="color:#9A8778;font-size:13px;margin-bottom:16px">
-          Your tasks are protected by a passcode on each device.
+          Signed in as <strong>${esc(AUTH.username)}</strong>. Your login is checked by Google, and the copy on this device is encrypted.
         </p>
-        <div style="display:flex;gap:8px">
-          <button onclick="changePasscode()" style="${B}flex:1;padding:12px;font-size:13px;
-            background:#FDEEE7;color:${accent}">Change Passcode</button>
-          <button onclick="lockApp()" style="${B}flex:1;padding:12px;font-size:13px;
-            background:#FDEEE7;color:${accent}">🔒 Lock</button>
-        </div>
+        <button onclick="signOut('Signed out.')" style="${B}width:100%;padding:12px;font-size:13px;
+          background:#FDEEE7;color:${accent}">Sign out</button>
       </div>
     </div>`;
   }
@@ -809,26 +755,22 @@ function render(){
 
 function fi(){setTimeout(()=>{const inp=document.getElementById('task-input');if(inp)inp.focus()},10)}
 
-function lockApp() {
-  document.getElementById('app').style.display = 'none';
-  document.getElementById('lock-screen').style.display = 'flex';
-  window.__focusOneUnlocked = false;
-  // Re-run lock screen setup
-  location.reload();
-}
-
-function changePasscode() {
-  localStorage.removeItem('focusone_pin_hash');
-  lockApp();
-}
-
-// Initial render + auto-pull from sheet if connected
-window.__focusOneInit = function() {
-  render();
-  if(isConnected()) pullFromSheet();
-};
-// If already unlocked (shouldn't happen, but safety)
-if(window.__focusOneUnlocked) window.__focusOneInit();
+// Start: show login, or sign in automatically if "keep me signed in" was used
+(async function start(){
+  setupLoginForm('', false);
+  const saved = lsGet(REMEMBER_KEY), url = lsGet(URL_KEY);
+  if (saved && url) {
+    try {
+      const {username, password} = JSON.parse(saved);
+      document.getElementById('login-user').value = username;
+      document.getElementById('lock-hint').textContent = 'Signing in…';
+      await signIn(username, password, url, true);
+    } catch (err) {
+      lsDel(REMEMBER_KEY);
+      setupLoginForm(err.message, true);
+    }
+  }
+})();
 </script>
 </body>
 </html>
