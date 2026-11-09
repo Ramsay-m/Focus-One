@@ -1,0 +1,834 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Focus One">
+<meta name="theme-color" content="#FDF6EE">
+<title>Focus One</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,500;0,9..40,700;1,9..40,400&family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,800&display=swap');
+
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{font-family:'DM Sans',sans-serif;background:#FDF6EE;color:#3D2C1E;-webkit-tap-highlight-color:transparent;overflow-x:hidden}
+input,button,select{font-family:'DM Sans',sans-serif}
+button{-webkit-tap-highlight-color:transparent;cursor:pointer}
+
+@keyframes fadeUp{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:translateY(0)}}
+@keyframes scaleIn{from{opacity:0;transform:scale(.92)}to{opacity:1;transform:scale(1)}}
+@keyframes wiggle{0%,100%{transform:rotate(0)}25%{transform:rotate(-2deg)}75%{transform:rotate(2deg)}}
+@keyframes celebratePulse{0%,100%{transform:scale(1)}50%{transform:scale(1.06)}}
+@keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}
+
+#confetti-canvas{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:9999;display:none}
+#import-input{display:none}
+.tag{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:20px;font-size:12px;font-weight:600;letter-spacing:.02em;background:#e8e0d8;color:#5a4a3a}
+.tag.imp-high{background:#FDEEE7;color:#C0462B}
+.tag.imp-med{background:#FFF8E1;color:#B8860B}
+.tag.imp-low{background:#E6F7F0;color:#01A66F}
+.tag.proj{background:#EDE6F6;color:#6C3FA0}
+
+.sync-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+.sync-dot.connected{background:#01A66F}
+.sync-dot.offline{background:#FECA57}
+.sync-dot.disconnected{background:#ccc}
+.sync-spinner{display:inline-block;width:14px;height:14px;border:2px solid #E8734A;border-top-color:transparent;border-radius:50%;animation:spin .6s linear infinite;margin-right:6px;vertical-align:middle}
+
+.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#3D2C1E;color:#fff;padding:10px 20px;border-radius:12px;font-size:14px;font-weight:600;z-index:9998;opacity:0;transition:opacity .3s ease;pointer-events:none}
+.toast.show{opacity:1}
+
+#lock-screen{position:fixed;inset:0;background:#FDF6EE;z-index:10000;display:flex;align-items:center;justify-content:center}
+#lock-screen .lock-box{text-align:center;max-width:340px;width:90%;animation:scaleIn .4s ease}
+#lock-screen h1{font-family:'Fraunces',serif;font-size:36px;font-weight:800;color:#E8734A;margin-bottom:4px}
+#lock-screen .subtitle{color:#9A8778;font-size:15px;margin-bottom:32px}
+#lock-screen .pin-row{display:flex;gap:12px;justify-content:center;margin-bottom:20px}
+#lock-screen .pin-dot{width:16px;height:16px;border-radius:50%;border:2px solid #E8734A;transition:all .15s ease}
+#lock-screen .pin-dot.filled{background:#E8734A}
+#lock-screen .pin-dot.wrong{border-color:#C0462B;background:#C0462B;animation:wiggle .4s ease}
+#lock-screen .keypad{display:grid;grid-template-columns:repeat(3,72px);gap:10px;justify-content:center}
+#lock-screen .key{width:72px;height:56px;border:none;border-radius:14px;font-family:'DM Sans',sans-serif;font-size:22px;font-weight:700;cursor:pointer;transition:all .15s ease;background:#fff;color:#3D2C1E;box-shadow:0 2px 8px rgba(60,40,20,.07)}
+#lock-screen .key:active{transform:scale(.94);background:#FDEEE7}
+#lock-screen .key.fn{font-size:14px;font-weight:600;background:transparent;box-shadow:none;color:#9A8778}
+#lock-screen .lock-hint{color:#9A8778;font-size:13px;margin-top:16px;min-height:20px}
+#lock-screen .lock-hint.error{color:#C0462B}
+</style>
+</head>
+<body>
+<div id="lock-screen">
+  <div class="lock-box">
+    <h1>Focus One</h1>
+    <p class="subtitle">One task at a time. You've got this.</p>
+    <p id="lock-label" style="color:#3D2C1E;font-size:15px;font-weight:600;margin-bottom:20px">Enter your passcode</p>
+    <div class="pin-row" id="pin-dots"></div>
+    <div class="keypad" id="keypad"></div>
+    <p class="lock-hint" id="lock-hint"></p>
+  </div>
+</div>
+<canvas id="confetti-canvas"></canvas>
+<input type="file" id="import-input" accept=".json">
+<div id="toast" class="toast"></div>
+<div id="app" style="min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:32px 16px 80px;max-width:520px;margin:0 auto;display:none"></div>
+
+<script>
+// ============================================================
+// LOCK SCREEN
+// ============================================================
+(function(){
+  const PIN_LEN = 4;
+  const HASH_KEY = 'focusone_pin_hash';
+  let pin = '';
+  let confirmPin = '';
+  let phase = 'enter'; // 'setup' | 'confirm' | 'enter'
+  let wrong = false;
+
+  // Simple hash (SHA-256 via SubtleCrypto)
+  async function hashPin(p) {
+    const enc = new TextEncoder().encode('focusone_salt_' + p);
+    const buf = await crypto.subtle.digest('SHA-256', enc);
+    return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+  }
+
+  const stored = localStorage.getItem(HASH_KEY);
+  phase = stored ? 'enter' : 'setup';
+
+  const lockEl = document.getElementById('lock-screen');
+  const dotsEl = document.getElementById('pin-dots');
+  const labelEl = document.getElementById('lock-label');
+  const hintEl = document.getElementById('lock-hint');
+  const keypadEl = document.getElementById('keypad');
+
+  function renderLock() {
+    // Label
+    if (phase === 'setup') {
+      labelEl.textContent = 'Create a 4-digit passcode';
+      hintEl.textContent = 'This keeps your tasks private.';
+      hintEl.className = 'lock-hint';
+    } else if (phase === 'confirm') {
+      labelEl.textContent = 'Confirm your passcode';
+      hintEl.textContent = 'Enter it once more.';
+      hintEl.className = 'lock-hint';
+    } else {
+      labelEl.textContent = 'Enter your passcode';
+      if (wrong) {
+        hintEl.textContent = 'Wrong passcode. Try again.';
+        hintEl.className = 'lock-hint error';
+      } else {
+        hintEl.textContent = '';
+        hintEl.className = 'lock-hint';
+      }
+    }
+
+    // Dots
+    dotsEl.innerHTML = '';
+    for (let i = 0; i < PIN_LEN; i++) {
+      const d = document.createElement('div');
+      d.className = 'pin-dot' + (i < pin.length ? ' filled' : '') + (wrong && i < pin.length ? ' wrong' : '');
+      dotsEl.appendChild(d);
+    }
+
+    // Keypad
+    keypadEl.innerHTML = '';
+    const keys = [1,2,3,4,5,6,7,8,9,'','0','⌫'];
+    keys.forEach(k => {
+      const btn = document.createElement('button');
+      if (k === '') { btn.style.visibility = 'hidden'; btn.className = 'key'; }
+      else if (k === '⌫') { btn.className = 'key fn'; btn.textContent = '⌫'; btn.onclick = () => { pin = pin.slice(0,-1); wrong = false; renderLock(); }; }
+      else { btn.className = 'key'; btn.textContent = k; btn.onclick = () => pressKey(String(k)); }
+      keypadEl.appendChild(btn);
+    });
+  }
+
+  async function pressKey(digit) {
+    if (pin.length >= PIN_LEN) return;
+    wrong = false;
+    pin += digit;
+    renderLock();
+
+    if (pin.length === PIN_LEN) {
+      setTimeout(async () => {
+        if (phase === 'setup') {
+          confirmPin = pin;
+          pin = '';
+          phase = 'confirm';
+          renderLock();
+        } else if (phase === 'confirm') {
+          if (pin === confirmPin) {
+            const h = await hashPin(pin);
+            localStorage.setItem(HASH_KEY, h);
+            unlock();
+          } else {
+            pin = '';
+            confirmPin = '';
+            phase = 'setup';
+            wrong = true;
+            hintEl.textContent = "Didn't match. Let's start over.";
+            hintEl.className = 'lock-hint error';
+            renderLock();
+          }
+        } else {
+          const h = await hashPin(pin);
+          if (h === stored) {
+            unlock();
+          } else {
+            wrong = true;
+            pin = '';
+            renderLock();
+          }
+        }
+      }, 150);
+    }
+  }
+
+  function unlock() {
+    lockEl.style.display = 'none';
+    document.getElementById('app').style.display = 'flex';
+    window.__focusOneUnlocked = true;
+    // Fire the app init
+    if (window.__focusOneInit) window.__focusOneInit();
+  }
+
+  // Keyboard support for desktop
+  document.addEventListener('keydown', function(e) {
+    if (lockEl.style.display === 'none') return;
+    if (e.key >= '0' && e.key <= '9') pressKey(e.key);
+    else if (e.key === 'Backspace') { pin = pin.slice(0,-1); wrong = false; renderLock(); }
+  });
+
+  renderLock();
+})();
+</script>
+
+<script>
+// ============================================================
+// CONFIG — Paste your deployed Apps Script URL here
+// ============================================================
+const SCRIPT_URL = localStorage.getItem('focusone_script_url') || '';
+
+// ============================================================
+// STATE
+// ============================================================
+const SK = 'focusone_tasks';
+let tasks = loadLocal();
+let view = 'list';
+let focusTask = null;
+let skipped = [];
+let justDone = false;
+let fText='', fLoc='', fImp=null, fDur=null, fProj='';
+let focusProject = null; // null = show picker, '' = all, 'Name' = specific
+let newProjMode = false;
+let newProjText = '';
+let syncStatus = SCRIPT_URL ? 'connected' : 'disconnected'; // connected | syncing | offline | disconnected
+let lastSyncError = '';
+
+const LOCS = ['Home','Work','Office','Outside','Errands','Computer','Phone','Anywhere'];
+const IMP = [{l:'Low',v:1,e:'🌱'},{l:'Medium',v:2,e:'⚡'},{l:'High',v:3,e:'🔥'}];
+const DUR = [{l:'< 5 min',v:5,e:'⏱'},{l:'5–15 min',v:15,e:'🕐'},{l:'15–30 min',v:30,e:'🕑'},{l:'30–60 min',v:60,e:'🕒'},{l:'1+ hours',v:90,e:'🕓'}];
+
+function getProjects(){
+  const set=new Set();
+  tasks.forEach(t=>{if(t.project)set.add(t.project)});
+  return [...set].sort((a,b)=>a.localeCompare(b));
+}
+
+// ============================================================
+// TOAST
+// ============================================================
+let toastTimer;
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 2500);
+}
+
+// ============================================================
+// LOCAL PERSISTENCE (always used as cache)
+// ============================================================
+function loadLocal(){try{const r=localStorage.getItem(SK);if(r)return JSON.parse(r)}catch(e){}return[]}
+function saveLocal(){try{localStorage.setItem(SK,JSON.stringify(tasks))}catch(e){}}
+
+// ============================================================
+// GOOGLE SHEETS SYNC
+// ============================================================
+function getScriptUrl() {
+  return localStorage.getItem('focusone_script_url') || '';
+}
+
+function isConnected() {
+  return !!getScriptUrl();
+}
+
+async function sheetFetch(tasks_data) {
+  const url = getScriptUrl();
+  if (!url) return null;
+
+  syncStatus = 'syncing'; render();
+
+  try {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' }, // Apps Script needs this for CORS
+      body: JSON.stringify({ action: 'sync', tasks: tasks_data }),
+    });
+    const result = await resp.json();
+    if (result.success) {
+      syncStatus = 'connected';
+      lastSyncError = '';
+    } else {
+      syncStatus = 'offline';
+      lastSyncError = result.error || 'Unknown error';
+    }
+  } catch (err) {
+    syncStatus = 'offline';
+    lastSyncError = err.message;
+  }
+  render();
+}
+
+async function sheetPost(action, payload) {
+  const url = getScriptUrl();
+  if (!url) return null;
+
+  try {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify({ action, ...payload }),
+    });
+    return await resp.json();
+  } catch (err) {
+    syncStatus = 'offline';
+    lastSyncError = err.message;
+    render();
+    return null;
+  }
+}
+
+async function pullFromSheet() {
+  const url = getScriptUrl();
+  if (!url) return;
+
+  syncStatus = 'syncing'; render();
+
+  try {
+    const resp = await fetch(url);
+    const result = await resp.json();
+    if (result.success && Array.isArray(result.tasks)) {
+      tasks = result.tasks;
+      saveLocal();
+      syncStatus = 'connected';
+      lastSyncError = '';
+      toast('Synced from Google Sheets');
+    } else {
+      syncStatus = 'offline';
+      lastSyncError = result.error || 'Failed to pull';
+    }
+  } catch (err) {
+    syncStatus = 'offline';
+    lastSyncError = err.message;
+  }
+  render();
+}
+
+async function pushToSheet() {
+  await sheetFetch(tasks);
+  if (syncStatus === 'connected') toast('Pushed to Google Sheets');
+}
+
+// ============================================================
+// EXPORT / IMPORT (JSON file backup — still works)
+// ============================================================
+function exportTasks(){
+  const blob=new Blob([JSON.stringify(tasks,null,2)],{type:'application/json'});
+  const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;
+  const d=new Date();a.download=`focus-one-backup-${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}.json`;
+  document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
+}
+function triggerImport(){document.getElementById('import-input').click()}
+document.getElementById('import-input').addEventListener('change',function(e){
+  const file=e.target.files[0];if(!file)return;
+  const reader=new FileReader();
+  reader.onload=function(ev){
+    try{
+      const imp=JSON.parse(ev.target.result);
+      if(!Array.isArray(imp)){alert('Invalid file format.');return}
+      const ids=new Set(tasks.map(t=>t.id));let added=0;
+      imp.forEach(t=>{if(!ids.has(t.id)&&t.text){tasks.push(t);added++}});
+      if(added===0&&confirm(`All ${imp.length} tasks already exist. Replace entire list with this backup?`))tasks=imp;
+      saveLocal();
+      if(isConnected()) pushToSheet();
+      view='list';render();
+      if(added>0)toast(`Imported ${added} new task${added>1?'s':''}!`);
+    }catch(err){alert("Could not read file. Make sure it's a valid Focus One backup.")}
+  };reader.readAsText(file);e.target.value='';
+});
+
+// ============================================================
+// WEIGHTED PICK
+// ============================================================
+function pick(skipIds=[],projFilter=null){
+  let avail=tasks.filter(t=>!t.done&&!skipIds.includes(t.id));
+  if(projFilter==='__none__')avail=avail.filter(t=>!t.project);
+  else if(projFilter)avail=avail.filter(t=>t.project===projFilter);
+  if(!avail.length)return null;
+  const now=Date.now();
+  const w=avail.map(t=>{const age=(now-t.createdAt)/864e5;return(1+age*.5)*(t.importance||1)});
+  const total=w.reduce((s,x)=>s+x,0);let r=Math.random()*total;
+  for(let i=0;i<avail.length;i++){r-=w[i];if(r<=0)return avail[i]}
+  return avail[avail.length-1];
+}
+
+// ============================================================
+// CONFETTI
+// ============================================================
+function boom(){
+  const c=document.getElementById('confetti-canvas');c.style.display='block';
+  const ctx=c.getContext('2d');c.width=innerWidth;c.height=innerHeight;
+  const cols=['#FF6B6B','#FECA57','#48DBFB','#FF9FF3','#54A0FF','#5F27CD','#01A66F','#FF6348'];
+  const ps=Array.from({length:150},()=>({x:Math.random()*c.width,y:Math.random()*c.height*-1.5,
+    w:Math.random()*10+5,h:Math.random()*6+4,col:cols[Math.floor(Math.random()*cols.length)],
+    sh:['r','c','t'][Math.floor(Math.random()*3)],vx:(Math.random()-.5)*6,vy:Math.random()*4+3,
+    rot:Math.random()*360,rs:(Math.random()-.5)*12,op:1}));
+  let f=0;
+  (function draw(){ctx.clearRect(0,0,c.width,c.height);f++;let alive=false;
+    ps.forEach(p=>{p.x+=p.vx;p.vy+=.12;p.y+=p.vy;p.rot+=p.rs;
+      if(f>108)p.op-=.02;if(p.op<0)p.op=0;if(p.op>0)alive=true;
+      ctx.save();ctx.translate(p.x,p.y);ctx.rotate(p.rot*Math.PI/180);ctx.globalAlpha=p.op;ctx.fillStyle=p.col;
+      if(p.sh==='r')ctx.fillRect(-p.w/2,-p.h/2,p.w,p.h);
+      else if(p.sh==='c'){ctx.beginPath();ctx.arc(0,0,p.w/2,0,Math.PI*2);ctx.fill()}
+      else{ctx.beginPath();ctx.moveTo(0,-p.w/2);ctx.lineTo(p.w/2,p.h/2);ctx.lineTo(-p.w/2,p.h/2);ctx.closePath();ctx.fill()}
+      ctx.restore()});
+    if(!alive||f>180){ctx.clearRect(0,0,c.width,c.height);c.style.display='none';return}
+    requestAnimationFrame(draw)})();
+}
+
+// ============================================================
+// ACTIONS
+// ============================================================
+function nav(v){view=v;justDone=false;if(v!=='focus'){focusProject=null}render()}
+function enterFocus(){skipped=[];justDone=false;focusProject=null;view='focus';render()}
+function pickFromProject(proj){focusProject=proj||'';skipped=[];focusTask=pick([],proj||null);render()}
+
+function skipIt(){skipped.push(focusTask?.id);const pf=focusProject||null;let n=pick(skipped,pf);if(!n){n=pick([],pf);skipped=[]}focusTask=n;render()}
+
+function completeIt(){
+  if(!focusTask)return;
+  tasks=tasks.map(t=>t.id===focusTask.id?{...t,done:true}:t);
+  saveLocal();
+  if(isConnected()) sheetPost('update',{task:{...focusTask,done:true}});
+  justDone=true;boom();render();
+}
+
+function del(id){
+  tasks=tasks.filter(t=>t.id!==id);
+  saveLocal();
+  if(isConnected()) sheetPost('delete',{id});
+  render();
+}
+
+function clearDone(){
+  if(confirm('Remove all completed tasks?')){
+    const doneIds=tasks.filter(t=>t.done).map(t=>t.id);
+    tasks=tasks.filter(t=>!t.done);
+    saveLocal();
+    if(isConnected()) pushToSheet(); // full sync is simplest for bulk delete
+    render();
+  }
+}
+
+function addTask(){
+  if(!fText.trim())return;
+  const newTask = {
+    id:Date.now()+'-'+Math.random().toString(36).slice(2,9),
+    text:fText.trim(),location:fLoc||null,importance:fImp,duration:fDur,project:fProj||null,done:false,createdAt:Date.now(),
+  };
+  tasks.push(newTask);
+  saveLocal();
+  if(isConnected()) sheetPost('add',{task:newTask});
+  fText='';fLoc='';fImp=null;fDur=null;fProj='';newProjMode=false;newProjText='';view='list';render();
+}
+
+// Settings actions
+function saveScriptUrl() {
+  const inp = document.getElementById('script-url-input');
+  const url = inp.value.trim();
+  if (url) {
+    localStorage.setItem('focusone_script_url', url);
+    syncStatus = 'connected';
+    toast('Connected! Syncing...');
+    render();
+    // Push current local tasks to sheet
+    pushToSheet();
+  } else {
+    localStorage.removeItem('focusone_script_url');
+    syncStatus = 'disconnected';
+    toast('Disconnected from Google Sheets');
+    render();
+  }
+}
+
+function disconnectSheet() {
+  localStorage.removeItem('focusone_script_url');
+  syncStatus = 'disconnected';
+  lastSyncError = '';
+  toast('Disconnected');
+  render();
+}
+
+// ============================================================
+// HELPERS
+// ============================================================
+function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
+function impI(v){return IMP.find(i=>i.v===v)}
+function durI(v){return DUR.find(d=>d.v===v)}
+function impCls(v){return v===3?'imp-high':v===2?'imp-med':v===1?'imp-low':''}
+function tag(txt,cls){return `<span class="tag ${cls||''}">${txt}</span>`}
+function tagsFor(t){let h='';
+  if(t.project)h+=tag('📂 '+esc(t.project),'proj');
+  if(t.location)h+=tag('📍 '+esc(t.location));
+  if(t.importance){const i=impI(t.importance);h+=tag(i.e+' '+i.l,impCls(t.importance))}
+  if(t.duration){const d=durI(t.duration);h+=tag(d.e+' '+d.l)}
+  return h;
+}
+
+const B='border:none;font-weight:700;border-radius:14px;cursor:pointer;transition:all .18s ease;';
+const accent='#E8734A',green='#01A66F';
+
+// ============================================================
+// RENDER
+// ============================================================
+function render(){
+  const app=document.getElementById('app');
+  const inc=tasks.filter(t=>!t.done), done=tasks.filter(t=>t.done);
+  let h='';
+
+  // Header
+  h+=`<div style="text-align:center;margin-bottom:24px;animation:fadeUp .5s ease">
+    <h1 style="font-family:'Fraunces',serif;font-size:36px;font-weight:800;color:${accent};letter-spacing:-.02em;margin-bottom:4px">Focus One</h1>
+    <p style="color:#9A8778;font-size:15px;font-weight:500">One task at a time. You've got this.</p>`;
+
+  // Sync status indicator
+  if (isConnected()) {
+    const dotClass = syncStatus === 'syncing' ? '' : (syncStatus === 'offline' ? 'offline' : 'connected');
+    const label = syncStatus === 'syncing' ? 'Syncing...' : (syncStatus === 'offline' ? 'Offline (local)' : 'Google Sheets ✓');
+    h += `<div style="margin-top:8px;font-size:12px;color:#9A8778;font-weight:600;display:flex;align-items:center;justify-content:center">`;
+    if (syncStatus === 'syncing') {
+      h += `<span class="sync-spinner"></span>`;
+    } else {
+      h += `<span class="sync-dot ${dotClass}"></span>`;
+    }
+    h += `${label}</div>`;
+  }
+  h += `</div>`;
+
+  // Nav
+  h+=`<div style="display:flex;gap:8px;margin-bottom:28px;animation:fadeUp .5s ease .05s both">`;
+  [{k:'list',l:'📋 My Tasks'},{k:'add',l:'✏️ Add Task'},{k:'settings',l:'⚙️'}].forEach(t=>{
+    const a=view===t.k;
+    h+=`<button onclick="nav('${t.k}')" style="${B}padding:10px 20px;font-size:14px;
+      background:${a?accent:'#fff'};color:${a?'#fff':'#3D2C1E'};
+      box-shadow:${a?'0 4px 14px rgba(232,115,74,.3)':'0 2px 16px rgba(60,40,20,.07)'}">${t.l}</button>`;
+  });
+  h+=`</div><div style="width:100%">`;
+
+  // ====== LIST VIEW ======
+  if(view==='list'){
+    h+=`<div style="animation:fadeUp .4s ease">`;
+    if(inc.length>0)h+=`<button onclick="enterFocus()" style="${B}width:100%;padding:18px 24px;font-size:18px;
+      background:linear-gradient(135deg,${accent},#D4563A);color:#fff;box-shadow:0 6px 24px rgba(232,115,74,.35);
+      margin-bottom:24px;display:flex;align-items:center;justify-content:center;gap:10px">
+      <span style="font-size:24px">🎯</span> Pick a task for me!</button>`;
+    if(inc.length===0)h+=`<div style="text-align:center;padding:40px;color:#9A8778;animation:scaleIn .4s ease">
+      <div style="font-size:48px;margin-bottom:12px">🌿</div>
+      <h3 style="font-family:'Fraunces',serif;font-size:20px;font-weight:600;margin-bottom:8px;color:#3D2C1E">All clear!</h3>
+      <p style="font-size:14px">Add a task to get started.</p></div>`;
+    inc.forEach((t,i)=>{
+      h+=`<div style="background:#fff;border-radius:16px;padding:16px 18px;margin-bottom:10px;
+        box-shadow:0 2px 16px rgba(60,40,20,.07);display:flex;align-items:flex-start;gap:12px;
+        animation:fadeUp .35s ease ${i*.04}s both">
+        <div style="flex:1"><p style="font-size:15px;font-weight:600;margin-bottom:6px">${esc(t.text)}</p>
+        <div style="display:flex;flex-wrap:wrap;gap:6px">${tagsFor(t)}</div></div>
+        <button onclick="del('${t.id}')" title="Delete" style="${B}background:transparent;color:#9A8778;
+          font-size:18px;padding:4px 8px;line-height:1">×</button></div>`;
+    });
+    if(done.length>0){
+      h+=`<details style="margin-top:24px"><summary style="cursor:pointer;color:#9A8778;font-size:13px;
+        font-weight:600;letter-spacing:.05em;text-transform:uppercase;margin-bottom:8px">Completed (${done.length})</summary>`;
+      done.forEach(t=>{h+=`<div style="background:#fff;border-radius:12px;padding:12px 16px;margin-bottom:6px;
+        opacity:.55;display:flex;align-items:center;gap:10px">
+        <span style="color:${green};font-size:18px">✓</span>
+        <span style="text-decoration:line-through;font-size:14px;flex:1">${esc(t.text)}</span>
+        <button onclick="del('${t.id}')" style="${B}background:transparent;color:#9A8778;font-size:16px;padding:2px 6px">×</button></div>`});
+      h+=`<button onclick="clearDone()" style="${B}background:transparent;color:#C0462B;font-size:12px;
+        margin-top:8px;padding:6px 0;text-decoration:underline">Clear all completed</button></details>`;
+    }
+    h+=`</div>`;
+  }
+
+  // ====== ADD VIEW ======
+  if(view==='add'){
+    const lbl='font-size:12px;font-weight:700;color:#9A8778;text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:8px';
+    h+=`<div style="background:#fff;border-radius:20px;padding:24px;box-shadow:0 2px 16px rgba(60,40,20,.07);animation:scaleIn .35s ease">
+      <h2 style="font-family:'Fraunces',serif;font-size:22px;font-weight:700;margin-bottom:20px">New Task</h2>
+      <label style="${lbl}">What do you need to do?</label>
+      <input type="text" id="task-input" placeholder="e.g. Take out the recycling" value="${esc(fText)}"
+        oninput="fText=this.value" onkeydown="if(event.key==='Enter')addTask()"
+        style="width:100%;padding:14px 16px;border:2px solid #EDE4DA;border-radius:12px;font-size:16px;
+        outline:none;transition:border .2s;margin-bottom:20px"
+        onfocus="this.style.borderColor='${accent}'" onblur="this.style.borderColor='#EDE4DA'">
+      <label style="${lbl}">Project <span style="font-weight:400;text-transform:none">(optional)</span></label>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:${newProjMode?'10':'20'}px">`;
+    const projs=getProjects();
+    projs.forEach(p=>{const a=fProj===p;
+      h+=`<button onclick="fProj=fProj==='${esc(p)}'?'':'${esc(p)}';newProjMode=false;render();fi()" style="${B}padding:7px 14px;font-size:13px;
+        background:${a?'#6C3FA0':'#EDE6F6'};color:${a?'#fff':'#6C3FA0'}">📂 ${esc(p)}</button>`});
+    if(!newProjMode){
+      h+=`<button onclick="newProjMode=true;newProjText='';fProj='';render()" style="${B}padding:7px 14px;font-size:13px;
+        background:#EDE6F6;color:#6C3FA0;border:1.5px dashed #C4B0DD">+ New</button>`;
+    }
+    h+=`</div>`;
+    if(newProjMode){
+      h+=`<div style="display:flex;gap:8px;margin-bottom:20px">
+        <input type="text" id="new-proj-input" placeholder="Project name" value="${esc(newProjText)}"
+          oninput="newProjText=this.value;fProj=this.value"
+          onkeydown="if(event.key==='Enter'){event.preventDefault();document.getElementById('task-input').focus()}"
+          style="flex:1;padding:10px 14px;border:2px solid #C4B0DD;border-radius:10px;font-size:14px;outline:none"
+          onfocus="this.style.borderColor='#6C3FA0'" onblur="this.style.borderColor='#C4B0DD'">
+        <button onclick="newProjMode=false;fProj='';render();fi()" style="${B}padding:10px 14px;font-size:13px;
+          background:transparent;color:#9A8778">Cancel</button></div>`;
+      setTimeout(()=>{const np=document.getElementById('new-proj-input');if(np)np.focus()},20);
+    }
+    h+=`<label style="${lbl}">Where? <span style="font-weight:400;text-transform:none">(optional)</span></label>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:20px">`;
+    LOCS.forEach(loc=>{const a=fLoc===loc;
+      h+=`<button onclick="fLoc=fLoc==='${loc}'?'':'${loc}';render();fi()" style="${B}padding:7px 14px;font-size:13px;
+        background:${a?accent:'#FDEEE7'};color:${a?'#fff':accent}">${loc}</button>`});
+    h+=`</div><label style="${lbl}">Importance <span style="font-weight:400;text-transform:none">(optional)</span></label>
+      <div style="display:flex;gap:8px;margin-bottom:20px">`;
+    IMP.forEach(im=>{const a=fImp===im.v;
+      h+=`<button onclick="fImp=fImp===${im.v}?null:${im.v};render();fi()" style="${B}flex:1;padding:10px 8px;font-size:14px;
+        background:${a?accent:'#FDEEE7'};color:${a?'#fff':accent}">${im.e} ${im.l}</button>`});
+    h+=`</div><label style="${lbl}">How long will it take?</label>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:24px">`;
+    DUR.forEach(d=>{const a=fDur===d.v;
+      h+=`<button onclick="fDur=fDur===${d.v}?null:${d.v};render();fi()" style="${B}padding:8px 14px;font-size:13px;
+        background:${a?accent:'#FDEEE7'};color:${a?'#fff':accent}">${d.e} ${d.l}</button>`});
+    const ok=fText.trim().length>0;
+    h+=`</div><button onclick="addTask()" style="${B}width:100%;padding:16px;font-size:16px;
+      background:${ok?'linear-gradient(135deg,'+accent+',#D4563A)':'#EDE4DA'};
+      color:${ok?'#fff':'#9A8778'};box-shadow:${ok?'0 4px 18px rgba(232,115,74,.3)':'none'};
+      cursor:${ok?'pointer':'default'}">Add Task</button></div>`;
+  }
+
+  // ====== FOCUS VIEW ======
+  if(view==='focus'){
+    h+=`<div style="animation:scaleIn .4s ease;text-align:center">`;
+    if(justDone){
+      const rem=tasks.filter(t=>!t.done).length;
+      h+=`<div style="animation:celebratePulse .6s ease 2">
+        <div style="font-size:64px;margin-bottom:16px">🎉</div>
+        <h2 style="font-family:'Fraunces',serif;font-size:28px;font-weight:800;color:${green};margin-bottom:8px">Nice work!</h2>
+        <p style="color:#9A8778;font-size:15px;margin-bottom:28px">You crushed it. One less thing to worry about.</p>
+        <div style="display:flex;gap:10px;justify-content:center">
+          <button onclick="nav('list')" style="${B}padding:14px 28px;font-size:15px;background:#fff;color:#3D2C1E;
+            box-shadow:0 2px 16px rgba(60,40,20,.07)">Back to List</button>
+          ${rem>0?`<button onclick="enterFocus()" style="${B}padding:14px 28px;font-size:15px;
+            background:linear-gradient(135deg,${accent},#D4563A);color:#fff;
+            box-shadow:0 4px 18px rgba(232,115,74,.3)">🎯 Another one!</button>`:''}</div></div>`;
+    }else if(focusProject===null){
+      // Project picker step
+      const projs=getProjects();
+      const inc2=tasks.filter(t=>!t.done);
+      if(inc2.length===0){
+        h+=`<div style="font-size:48px;margin-bottom:12px">🌿</div>
+          <p style="color:#9A8778">No tasks available. Add some first!</p>
+          <button onclick="nav('add')" style="${B}margin-top:16px;padding:12px 24px;font-size:14px;
+            background:${accent};color:#fff">Add a Task</button>`;
+      } else {
+        h+=`<p style="font-size:13px;font-weight:700;color:#9A8778;text-transform:uppercase;letter-spacing:.08em;margin-bottom:20px">Pick from which project?</p>`;
+        // "All tasks" button
+        const allCount=inc2.length;
+        h+=`<button onclick="pickFromProject('')" style="${B}width:100%;padding:16px 20px;font-size:16px;
+          background:linear-gradient(135deg,${accent},#D4563A);color:#fff;box-shadow:0 4px 18px rgba(232,115,74,.3);
+          margin-bottom:12px;display:flex;align-items:center;justify-content:center;gap:10px">
+          <span style="font-size:20px">🎲</span> All tasks <span style="opacity:.7;font-size:13px">(${allCount})</span></button>`;
+        // Per-project buttons
+        projs.forEach(p=>{
+          const ct=inc2.filter(t=>t.project===p).length;
+          if(ct>0)h+=`<button onclick="pickFromProject('${esc(p)}')" style="${B}width:100%;padding:14px 20px;font-size:15px;
+            background:#fff;color:#3D2C1E;box-shadow:0 2px 16px rgba(60,40,20,.07);margin-bottom:8px;
+            display:flex;align-items:center;gap:10px;text-align:left">
+            <span style="font-size:18px">📂</span> <span style="flex:1">${esc(p)}</span>
+            <span style="color:#9A8778;font-size:13px">${ct}</span></button>`;
+        });
+        // Unassigned tasks
+        const noProj=inc2.filter(t=>!t.project).length;
+        if(noProj>0 && projs.length>0)h+=`<button onclick="pickFromProject('__none__')" style="${B}width:100%;padding:14px 20px;font-size:15px;
+          background:#fff;color:#3D2C1E;box-shadow:0 2px 16px rgba(60,40,20,.07);margin-bottom:8px;
+          display:flex;align-items:center;gap:10px;text-align:left">
+          <span style="font-size:18px">📋</span> <span style="flex:1;color:#9A8778">No project</span>
+          <span style="color:#9A8778;font-size:13px">${noProj}</span></button>`;
+        h+=`<button onclick="nav('list')" style="${B}margin-top:12px;padding:10px 20px;font-size:13px;
+          background:transparent;color:#9A8778">← Back to list</button>`;
+      }
+    }else if(focusTask){
+      const projLabel=focusProject==='__none__'?'No project':(focusProject||'All tasks');
+      h+=`<p style="font-size:13px;font-weight:700;color:#9A8778;text-transform:uppercase;letter-spacing:.08em;margin-bottom:20px">
+        Your one thing right now${focusProject?` · ${esc(projLabel)}`:''}:</p>
+        <div style="background:#fff;border-radius:24px;padding:36px 28px;box-shadow:0 8px 36px rgba(60,40,20,.1);margin-bottom:28px;animation:wiggle .4s ease">
+          <h2 style="font-family:'Fraunces',serif;font-size:26px;font-weight:700;margin-bottom:16px;line-height:1.3">${esc(focusTask.text)}</h2>
+          <div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:center">${tagsFor(focusTask)}</div></div>
+        <div style="display:flex;gap:10px;justify-content:center">
+          <button onclick="skipIt()" style="${B}padding:14px 28px;font-size:15px;background:#fff;color:#9A8778;
+            box-shadow:0 2px 16px rgba(60,40,20,.07)">Skip →</button>
+          <button onclick="completeIt()" style="${B}padding:14px 28px;font-size:15px;
+            background:linear-gradient(135deg,${green},#018A5C);color:#fff;
+            box-shadow:0 4px 18px rgba(1,166,111,.3)">✓ Done!</button></div>
+        <button onclick="nav('list')" style="${B}margin-top:16px;padding:10px 20px;font-size:13px;
+          background:transparent;color:#9A8778">← Back to list</button>`;
+    }else{
+      h+=`<div style="font-size:48px;margin-bottom:12px">🌿</div>
+        <p style="color:#9A8778">No tasks available${focusProject?' in this project':''}. Add some first!</p>
+        <div style="display:flex;gap:10px;justify-content:center;margin-top:16px">
+          <button onclick="enterFocus()" style="${B}padding:12px 24px;font-size:14px;
+            background:#fff;color:#3D2C1E;box-shadow:0 2px 16px rgba(60,40,20,.07)">Try another project</button>
+          <button onclick="nav('add')" style="${B}padding:12px 24px;font-size:14px;
+            background:${accent};color:#fff">Add a Task</button></div>`;
+    }
+    h+=`</div>`;
+  }
+
+  // ====== SETTINGS VIEW ======
+  if(view==='settings'){
+    const tc=tasks.length, dc=tasks.filter(t=>t.done).length;
+    const currentUrl = getScriptUrl();
+
+    h+=`<div style="background:#fff;border-radius:20px;padding:24px;box-shadow:0 2px 16px rgba(60,40,20,.07);animation:scaleIn .35s ease">
+      <h2 style="font-family:'Fraunces',serif;font-size:22px;font-weight:700;margin-bottom:4px">Settings</h2>
+      <p style="color:#9A8778;font-size:14px;margin-bottom:24px">
+        ${tc} task${tc!==1?'s':''} · ${dc} completed</p>
+
+      <!-- Google Sheets Connection -->
+      <div style="border:2px solid #EDE4DA;border-radius:16px;padding:20px;margin-bottom:20px">
+        <h3 style="font-size:14px;font-weight:700;margin-bottom:4px;display:flex;align-items:center;gap:8px">
+          <span style="font-size:20px">📊</span> Google Sheets Sync
+        </h3>
+        <p style="color:#9A8778;font-size:13px;margin-bottom:16px">
+          Connect to a Google Sheet to back up and sync your tasks.
+        </p>`;
+
+    if (currentUrl) {
+      // Connected state
+      const statusColor = syncStatus === 'connected' ? green : (syncStatus === 'offline' ? '#FECA57' : '#ccc');
+      const statusText = syncStatus === 'connected' ? 'Connected' : (syncStatus === 'offline' ? 'Connection issue' : 'Syncing...');
+      h += `
+        <div style="background:#E6F7F0;border-radius:12px;padding:12px 16px;margin-bottom:12px;
+          display:flex;align-items:center;gap:8px">
+          <span class="sync-dot" style="background:${statusColor}"></span>
+          <span style="font-size:13px;font-weight:600;color:${green}">${statusText}</span>
+        </div>
+        ${lastSyncError ? `<p style="color:#C0462B;font-size:12px;margin-bottom:12px">⚠ ${esc(lastSyncError)}</p>` : ''}
+        <div style="display:flex;gap:8px">
+          <button onclick="pullFromSheet()" style="${B}flex:1;padding:12px;font-size:13px;
+            background:#FDEEE7;color:${accent}">↓ Pull from Sheet</button>
+          <button onclick="pushToSheet()" style="${B}flex:1;padding:12px;font-size:13px;
+            background:#FDEEE7;color:${accent}">↑ Push to Sheet</button>
+        </div>
+        <button onclick="disconnectSheet()" style="${B}width:100%;padding:10px;font-size:12px;
+          background:transparent;color:#C0462B;margin-top:8px">Disconnect</button>`;
+    } else {
+      // Not connected state
+      h += `
+        <label style="font-size:12px;font-weight:700;color:#9A8778;display:block;margin-bottom:6px">
+          Apps Script Web App URL
+        </label>
+        <input type="text" id="script-url-input" placeholder="https://script.google.com/macros/s/..."
+          style="width:100%;padding:12px 14px;border:2px solid #EDE4DA;border-radius:10px;
+          font-size:13px;outline:none;margin-bottom:10px;transition:border .2s"
+          onfocus="this.style.borderColor='${accent}'" onblur="this.style.borderColor='#EDE4DA'">
+        <button onclick="saveScriptUrl()" style="${B}width:100%;padding:12px;font-size:14px;
+          background:linear-gradient(135deg,${accent},#D4563A);color:#fff;
+          box-shadow:0 4px 14px rgba(232,115,74,.3)">Connect</button>`;
+    }
+
+    h += `</div>
+
+      <!-- JSON Export/Import -->
+      <div style="border:2px solid #EDE4DA;border-radius:16px;padding:20px;margin-bottom:20px">
+        <h3 style="font-size:14px;font-weight:700;margin-bottom:4px;display:flex;align-items:center;gap:8px">
+          <span style="font-size:20px">💾</span> File Backup
+        </h3>
+        <p style="color:#9A8778;font-size:13px;margin-bottom:16px">
+          Export or import a JSON backup file.
+        </p>
+        <div style="display:flex;gap:8px">
+          <button onclick="exportTasks()" style="${B}flex:1;padding:12px;font-size:13px;
+            background:#FDEEE7;color:${accent}">📤 Export</button>
+          <button onclick="triggerImport()" style="${B}flex:1;padding:12px;font-size:13px;
+            background:#FDEEE7;color:${accent}">📥 Import</button>
+        </div>
+      </div>
+
+      <!-- Phone instructions -->
+      <div style="border:2px solid #EDE4DA;border-radius:16px;padding:20px;margin-bottom:20px">
+        <h3 style="font-size:14px;font-weight:700;margin-bottom:4px;display:flex;align-items:center;gap:8px">
+          <span style="font-size:20px">📱</span> Add to Home Screen
+        </h3>
+        <div style="color:#5a4a3a;font-size:13px;line-height:1.7;margin-top:8px">
+          <p style="margin-bottom:6px"><strong>iPhone:</strong> Tap share ↑ → "Add to Home Screen"</p>
+          <p><strong>Android:</strong> Tap ⋮ → "Add to Home screen"</p>
+        </div>
+      </div>
+
+      <!-- Security -->
+      <div style="border:2px solid #EDE4DA;border-radius:16px;padding:20px">
+        <h3 style="font-size:14px;font-weight:700;margin-bottom:4px;display:flex;align-items:center;gap:8px">
+          <span style="font-size:20px">🔒</span> Security
+        </h3>
+        <p style="color:#9A8778;font-size:13px;margin-bottom:16px">
+          Your tasks are protected by a passcode on each device.
+        </p>
+        <div style="display:flex;gap:8px">
+          <button onclick="changePasscode()" style="${B}flex:1;padding:12px;font-size:13px;
+            background:#FDEEE7;color:${accent}">Change Passcode</button>
+          <button onclick="lockApp()" style="${B}flex:1;padding:12px;font-size:13px;
+            background:#FDEEE7;color:${accent}">🔒 Lock</button>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  h+=`</div>`;
+  app.innerHTML=h;
+  if(view==='add'){const inp=document.getElementById('task-input');if(inp)inp.focus()}
+}
+
+function fi(){setTimeout(()=>{const inp=document.getElementById('task-input');if(inp)inp.focus()},10)}
+
+function lockApp() {
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('lock-screen').style.display = 'flex';
+  window.__focusOneUnlocked = false;
+  // Re-run lock screen setup
+  location.reload();
+}
+
+function changePasscode() {
+  localStorage.removeItem('focusone_pin_hash');
+  lockApp();
+}
+
+// Initial render + auto-pull from sheet if connected
+window.__focusOneInit = function() {
+  render();
+  if(isConnected()) pullFromSheet();
+};
+// If already unlocked (shouldn't happen, but safety)
+if(window.__focusOneUnlocked) window.__focusOneInit();
+</script>
+</body>
+</html>
